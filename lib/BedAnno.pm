@@ -2146,6 +2146,13 @@ sub varanno {
     if ($debugOpt) {
         $t0 = [gettimeofday];
     }
+    if (exists $self->{genome_h}) {
+        # using genome_h to enable genomicWalker
+        # but please do AWARE of the speed of annotation,
+        # this will slow down the annotation process depend on
+        # whether there are to many indel variants.
+        $var = $self->genomicWalker($var);
+    }
 
     my ($unified_start, $unified_ref, $unified_alt, $unified_rl, $no_use);
     if ($var->{guess} eq 'ref') {
@@ -3166,13 +3173,47 @@ sub _getCoveredProd {
     return ( $prb, $pre );
 }
 
+=head2 cal_anchor_for_rep
+
+    About   : due to trWalker may walk outside trRefComp, anchor calculation
+              may not be available by using trRefComp, so this method try to
+              calculate the anchor position by using nDot position of both
+              ends and the repeat element to guess the anchor nDot notation.
+              It would refer to many different cases.
+    Usage   : my $anchor_trN = _cal_anchor_for_rep($trBegin, $trEnd, $trlen, $reflen, $rel_p);
+    Returns : The anchor nDot notation for the relative offset position $rel_p,
+              compared with $trBegin.
+
+=cut
+
+sub _cal_anchor_for_rep {
+    my ($n5, $n3, $reflen, $trlen, $rel_p) = @_;
+    if ($n5 eq $n3 or $rel_p == 0) {
+        return $n5;
+    }
+    # 1. n5 and n3 all locate in the same exon
+    if ($n5 =~ /^\d+$/ and $n3 =~ /^\d+$/) {
+        if ($reflen == $n3 - $n5 + 1) {
+            return $n5 + $rel_p;
+        }
+        else {
+            return "";
+        }
+    }
+    # 2. n5 locate in AS near intron
+    elsif ($n5 =~ /^(\d+)-(\d+)$/) {
+        
+    }
+}
+
+
 =head2 getTrChange
 
     About   : Calculate the transcript changes, based on TrPostition
     Usage   : $beda->getTrChange($annoEnt);
     Returns : assign the following tags in annoEnt
-                trRef, prot, c, p, cc, polar, func
-                prRef, prAlt
+              trRef, prot, c, p, cc, polar, func
+              prRef, prAlt
 
 =cut
 
@@ -3236,13 +3277,18 @@ sub getTrChange {
 
         $trannoEnt->{prot} = $trdbEnt->{prot}
           if ( exists $trdbEnt->{prot} and $trdbEnt->{prot} ne "." );
-        my $f = ($cdsOpt) ? 'c.' : 'n.';
-        my $chgvs_5 =
-          ($cdsOpt) ? $trannoEnt->{cdsBegin} : $trannoEnt->{rnaBegin};
-        my $chgvs_3 = ($cdsOpt) ? $trannoEnt->{cdsEnd} : $trannoEnt->{rnaEnd};
+        my ($f, $chgvs_5, $chgvs_3);
         if ($cdsOpt) {
+            $f = 'c.';
+            $chgvs_5 = $trannoEnt->{cdsBegin};
+            $chgvs_3 = $trannoEnt->{cdsEnd};
             ( $trannoEnt->{protBegin}, $trannoEnt->{protEnd} ) =
               _getCoveredProd( $trdbEnt, $chgvs_5, $chgvs_3 );
+        }
+        else {
+            $f = 'n.';
+            $chgvs_5 = $trannoEnt->{rnaBegin};
+            $chgvs_3 = $trannoEnt->{rnaEnd};
         }
 
         # [ aaPos, codon, aa, polar, frame, [framealt] ]
@@ -3295,7 +3341,8 @@ sub getTrChange {
             next;
         }
 
-        if ( $trRef =~ /=/ ) {    # reference sequence too long
+        # 3. check if reference sequence is too long to parse
+        if ( $trRef =~ /=/ ) {
             if ( $trannoEnt->{r_Begin} ne $trannoEnt->{r_End} ) {
                 $trannoEnt->{func} = 'span';
             }
@@ -3306,6 +3353,8 @@ sub getTrChange {
             $trannoEnt->{c} .= 'ins' . $trAlt if ( $trAlt ne "" );
             next;
         }
+
+        # 4. check if transcipt has no change
         if ( $trRef eq $trAlt ) {
             $trannoEnt->{func} = 'no-change';
             $trannoEnt->{c} = $f;
@@ -3324,9 +3373,30 @@ sub getTrChange {
             next;
         }
 
-        my ( $trBegin, $trEnd, $real_var, $rUnified ) =
-          $self->trWalker( $tid, $trannoEnt );
-        my ( $real_p, $real_r, $real_a, $real_rl, $real_al ) = @$rUnified;
+        my (
+            $trBegin, $trEnd,  $real_var, $real_p,
+            $real_r,  $real_a, $real_rl,  $real_al
+        );
+        if ( exists $self->{genome_h} ) {
+            # with genomicWalker, the difference between 
+            # genomic sequence and transcript will be not allowed to walk around
+            # so the variant location with genomicWalker applied should not be changed
+            # for variant on transcript
+            $real_var =
+              BedAnno::Var->new( $tid, 0, length( $trannoEnt->{trRef} ),
+                $trannoEnt->{trRef}, $trAnnoEnt->{trAlt} );
+            ( $real_p, $real_r, $real_a, $real_rl, $real_al ) =
+              $real_var->getUnifiedVar('+');
+            $trBegin = reCalTrPos_by_ofst( $trannoEnt, $real_p );
+            $trEnd   = reCalTrPos_by_ofst( $trannoEnt, ($real_p + $real_rl - 1) );
+        }
+        else {
+            # get the variant walker on transcript
+            my $rUnified;
+            ( $trBegin, $trEnd, $real_var, $rUnified ) =
+              $self->trWalker( $tid, $trannoEnt );
+            ( $real_p, $real_r, $real_a, $real_rl, $real_al ) = @$rUnified;
+        }
 
         $chgvs_5 =
           ($cdsOpt)
@@ -3339,379 +3409,176 @@ sub getTrChange {
             $trdbEnt->{len} )
           : $trEnd;
         $cmpPos = $self->cmpPos( $chgvs_5, $chgvs_3 );
+# debug
+#        print STDERR Data::Dumper->Dump(
+#            [ $real_var, $trBegin,  $trEnd,  $chgvs_5,  $chgvs_3,  $cmpPos ],
+#            [ "real_var", "trBegin", "trEnd", "chgvs_5", "chgvs_3", "cmpPos" ]
+#        );
 
-        # check if a rep get across the utr/cds edge and can be curated
-        # to a variant in cds region, add a new key uncurated_cHGVS
-        # to restore the uncurated version of cHGVS
-        if ( $real_var->{imp} eq 'rep' and $cdsOpt
-                and ( $chgvs_5 =~ /^\d+$/ xor $chgvs_3 =~ /^\d+$/ )
-                and ( $chgvs_5 =~ /^\-\d+$/ xor $chgvs_3 =~ /^\*\d+$/ )
-        )
-        {
-            my $lesser_len = ($real_rl < $real_al) ? $real_rl : $real_al;
-            if (
-                ( $chgvs_5 =~ /^\-(\d+)$/ and $1 <= $lesser_len )
-                or ( $chgvs_5 =~ /^(\d+)$/
-                    and ( $trdbEnt->{csto} - $1 ) <= $lesser_len )
-              )
-            {
-                # 5utr and first cds
-                my $offset = $1;
-                my $opt_53 = ( $chgvs_5 =~ /^\-/ ) ? 1 : 0;
-                if ( !$opt_53 ) {
-                    $offset = $trdbEnt->{csto} - $offset;
-                }
-                my $change_cn = 0;
-                $change_cn++
-                  while ( $offset > $change_cn * $real_var->{replen} );
-
-                # restore uncurated version of cHGVS
-                $trannoEnt->{uncurated_cHGVS} =
-                  $f . $chgvs_5 . '_' . $chgvs_3 . 'del';
-                $trannoEnt->{uncurated_cHGVS} .=
-                  ( $real_r =~ /^[ACGTN]+$/ and length($real_r) < 50 )
-                  ? $real_r
-                  : "";
-
-                if ( $real_al > 0 ) {
-                    $trannoEnt->{uncurated_cHGVS} .= 'ins' . $real_a;
-                }
-
-                my $trPosChanged = $change_cn * $real_var->{replen};
-                $trBegin += $trPosChanged;
-                $real_var = BedAnno::Var->new(
-                    $tid, 0,
-                    $real_rl - $trPosChanged,
-                    substr( $real_r, $trPosChanged ),
-                    substr( $real_a, $trPosChanged )
-                );
-
-                ( $real_p, $real_r, $real_a, $real_rl, $real_al ) =
-                  $real_var->getUnifiedVar('+');
-                $chgvs_5 =
-                  ($cdsOpt)
-                  ? _cPosMark(
-                    $trBegin,         $trdbEnt->{csta},
-                    $trdbEnt->{csto}, $trdbEnt->{len}
-                  )
-                  : $trBegin;
-                $chgvs_3 =
-                  ($cdsOpt)
-                  ? _cPosMark(
-                    $trEnd,           $trdbEnt->{csta},
-                    $trdbEnt->{csto}, $trdbEnt->{len}
-                  )
-                  : $trEnd;
-                $cmpPos = $self->cmpPos( $chgvs_5, $chgvs_3 );
+        # 5. check if the variant is a repeat
+        my $origin_chgvs_5 = $chgvs_5; # due to 3'rule of unified annotation,
+        my $origin_chgvs_3 = $chgvs_3; # hgvs positions will extend or shift to the 
+        my $origin_cmpPos  = $cmpPos;  # new ones, so these for keeping origins.
+        my $origin_trBegin = $trBegin;
+        if ( $real_var->{imp} eq 'rep' ) {
+            # unify local version of HGVS to the following format:
+            # $indicator.$reference_start_$reference_end$rep_element[$ref_cn>$alt_cn]
+            # no matter if it belongs to a duplication.
+            $trannoEnt->{c} = $f . $chgvs_5;
+            if ($cmpPos) {
+                $trannoEnt->{c} .= '_' . $chgvs_3;
             }
-        }
+            $trannoEnt->{c} .=
+                $real_var->{rep} . '['
+              . $real_var->{ref_cn} . '>'
+              . $real_var->{alt_cn} . ']';
 
- # debug
- #        print STDERR Data::Dumper->Dump(
- #            [ $real_var, $trBegin,  $trEnd,  $chgvs_5,  $chgvs_3,  $cmpPos ],
- #            [ "real_var", "trBegin", "trEnd", "chgvs_5", "chgvs_3", "cmpPos" ]
- #        );
+            if ( exists $self->{genome_h} ) { # with genomicWalker
+                # Let standard_cHGVS always obey the rule of HGVS recommendation
+                # To let the duplication like repeat annotated in dup format.
+                #
+                # ** coding region repeat must have 3x number repeat element length
+                # to annotated as repeat, otherwise annotated in normal indel format.
+                # This rule is found to be in HGVS version 19.01.
 
-        # * check if a repeat case, and use cerntain chgvs string
-        # * assign cHGVS string
-        if (
-            $real_var->{imp} eq 'rep'
-
-            # not get across the edge of cds/non-cds region
-            and !( $chgvs_5 !~ /^\d+$/ xor $chgvs_3 !~ /^\d+$/ )
-
-            # not get across the edge of intron/exon region or promoter / 3'd
-            and !(
-                $chgvs_5 !~ /\d+[\+\-][ud]?\d+/ xor $chgvs_3 !~
-                /\d+[\+\-][ud]?\d+/
-            )
-
-            # we currently assume repeat variant won't get across more than
-            # two region, so ommit other case test
-          )
-        {
-            my $trRep = $real_var->{rep};
-
-            if (    $real_var->{ref_cn} == 1
-                and $real_var->{alt_cn} == 2 )
-            {
-                if ( $real_var->{replen} == 1 ) {
-                    $trannoEnt->{c} = $f . $chgvs_5 . 'dup' . $trRep;
-                }
-                else {
-                    $trannoEnt->{c} =
-                      $f . $chgvs_5 . '_' . $chgvs_3 . 'dup' . $trRep;
-                }
-            }
-            else {
-                $trannoEnt->{c} =
-                    $f
-                  . $chgvs_5
-                  . $trRep . '['
-                  . $real_var->{ref_cn} . '>'
-                  . $real_var->{alt_cn} . ']';
-            }
-
-            # 0.4.9
-            # add a new key: alt_cHGVS, using for query database which
-            # do not have current standard cHGVS string, especially
-            # for repeat case
-            #
-            # 0.5.0
-            # generate standard_cHGVS for this kind of variants
-            # prior to alt_cHGVS, change alt_cHGVS to only ins/del
-            # format notation
-
-            # give this opt to indicate whether to give standard_cHGVS
-            # a duplication format notation
-            my $dupopt =
-              (       $real_var->{ref_cn} > 1
-                  and $real_var->{alt_cn} - $real_var->{ref_cn} == 1 )
-              ? 1
-              : 0;
-
-            if (   $real_var->{ref_cn} > $real_var->{alt_cn}
-                or $dupopt )
-            {    # deletion and duplication
-                if ( !$dupopt ) {
-                    $trannoEnt->{standard_cHGVS} =
-                      $f . $chgvs_5 . $trRep . '[' . $real_var->{alt_cn} . ']';
-                }
-
-                my $changed_cn =
-                  abs( $real_var->{ref_cn} - $real_var->{alt_cn} );
-                my $changed_type = ($dupopt) ? 'dup' : 'del';
-                my $changed_cont = $trRep x $changed_cn;
-                my $changed_len  = length($changed_cont);
-                if ( $changed_cn == 1 and $real_var->{replen} == 1 ) {
-                    my $single_change = $f . $chgvs_3 . $changed_type . $trRep;
-                    if ($dupopt) {
-                        $trannoEnt->{standard_cHGVS} = $single_change;
+                my $assign_alt     = 0;       # 3'rule non-rep format to alt
+                my $assgin_std     = 0;       # 3'rule non-rep format to std
+                if (    $real_var->{alt_cn} > $real_var->{ref_cn}
+                    and $real_var->{ref_cn} >=
+                    ( $real_var->{alt_cn} - $real_var->{ref_cn} ) )
+                {
+                    # A repeat which can be annotated as dup
+                    my $sta_changed =
+                      2 * $real_var->{ref_cn} - $real_var->{alt_cn};
+                    if ( $sta_changed > 0 ) {
+                        $trBegin =
+                          reCalTrPos_by_ofst( $trannoEnt,
+                            $sta_changed * $real_var->{replen} );
+                        $chgvs_5 =
+                          ($cdsOpt)
+                          ? _cPosMark(
+                            $trBegin,         $trdbEnt->{csta},
+                            $trdbEnt->{csto}, $trdbEnt->{len}
+                          )
+                          : $trBegin;
+                        $cmpPos = $self->cmpPos( $chgvs_5, $chgvs_3 );
+                    }
+                    $trannoEnt->{standard_cHGVS} = $f;
+                    if ( $cmpPos == 0 ) {
+                        $trannoEnt->{standard_cHGVS} .= $chgvs_3 . 'dup' . $real_var->{rep};
                     }
                     else {
-                        $trannoEnt->{alt_cHGVS} = $single_change;
+                        $trannoEnt->{standard_cHGVS} .=
+                            $chgvs_5 . '_' 
+                          . $chgvs_3 . 'dup'
+                          . ( $real_var->{rep} x
+                              ( $real_var->{alt_cn} - $real_var->{ref_cn} ) );
                     }
+                    $assign_alt = 1;
                 }
-                else {
-                    my $renew_offset =
-                        ($dupopt)
-                      ? ( $real_var->{replen} * ( $real_var->{ref_cn} - 1 ) )
-                      : ( $real_var->{replen} * $real_var->{alt_cn} );
-
-                    my $renew_cHGVS;
-                    if ( $chgvs_5 =~ /^\d+$/ ) {    # cds / ncRNA exon
-                        $renew_cHGVS =
-                            $f
-                          . ( $chgvs_5 + $renew_offset ) . '_'
-                          . $chgvs_3
-                          . $changed_type
-                          . $changed_cont;
-                    }
-                    elsif ( $chgvs_5 =~ /^([\*\+]?)(\-?\d+)$/ ) {
-
-                        # utr region / ncRNA promoter 3'd region
-                        my $sig       = $1;
-                        my $start_pos = $2;
-                        if ( $sig eq '' ) {    # 5 utr
-                            $renew_cHGVS =
-                                $f
-                              . ( $start_pos + $renew_offset ) . '_'
-                              . $chgvs_3
-                              . $changed_type
-                              . $changed_cont;
-                        }
-                        else {                 # 3 utr
-                            $renew_cHGVS =
-                                $f
-                              . $sig
-                              . ( $start_pos + $renew_offset ) . '_'
-                              . $chgvs_3
-                              . $changed_type
-                              . $changed_cont;
-                        }
-                    }
-                    elsif ( $chgvs_5 =~ /^(\-?[^\-\+]+)(\+?d?)(\-?u?\d+)$/ ) {
-
-                        # intron or promoter or 3'downstream
-                        my $anchor5 = $1;
-                        my $sig5    = $2;
-                        my $offset5 = $3;
-                        my $u5_opt  = 0;
-                        if ( $offset5 =~ /u/ ) {
-                            $u5_opt = 1;
-                            $offset5 =~ s/u//;
-                        }
-                        if ( $chgvs_3 =~ /^(\-?[^\-\+]+)(\+?d?)(\-?u?\d+)$/ ) {
-                            my $anchor3 = $1;
-                            my $sig3    = $2;
-                            my $offset3 = $3;
-                            my $u3_opt  = 0;
-                            if ( $offset3 =~ /u/ ) {
-                                $u3_opt = 1;
-                                $offset3 =~ s/u//;
-                            }
-                            if ( $anchor3 eq $anchor5 and $sig5 eq $sig3 ) {
-                                my $anc_5 = $offset5 + $renew_offset;
-                                $anc_5 =~ s/^-/-u/ if ($u5_opt);
-                                $renew_cHGVS =
-                                    $f
-                                  . $anchor5
-                                  . $sig5
-                                  . $anc_5 . '_'
-                                  . $chgvs_3
-                                  . $changed_type
-                                  . $changed_cont;
-                            }
-                            elsif ( $anchor3 ne $anchor5
-                                and $sig5 eq '+'
-                                and $sig3 eq '' )
-                            {    # assume same intron
-                                my $half_offset =
-                                  ( $real_rl - ( $offset5 + $offset3 ) ) / 2;
-
-                                if ( $renew_offset < $half_offset ) {
-                                    $renew_cHGVS =
-                                        $f
-                                      . $anchor5
-                                      . $sig5
-                                      . ( $offset5 + $renew_offset ) . '_'
-                                      . $chgvs_3
-                                      . $changed_type
-                                      . $changed_cont;
-                                }
-                                else {
-                                    $renew_cHGVS =
-                                        $f
-                                      . $anchor3
-                                      . $sig3
-                                      . ( $offset3 - $changed_len + 1 )
-                                      . '_'
-                                      . $chgvs_3
-                                      . $changed_type
-                                      . $changed_cont;
-                                }
-                            }
-                            else {
-                                $self->warn(
-                                    "Warning: repeat get across more than",
-                                    " 3 different region: $tid:$trannoEnt->{c}"
-                                ) if ( !exists $self->{quiet} );
-                            }
-                        }
-                        else {
-                            $self->warn(
-                                "Warning: not both intron while parsing",
-                                " alt_cHGVS : $tid:$trannoEnt->{c}"
-                            ) if ( !exists $self->{quiet} );
-                        }
-                    }
-                    else {
-                        $self->warn(
-                            "Warning: Unknown chgvs5 while ",
-                            "parsing alt_cHGVS : $tid: $chgvs_5"
-                        ) if ( !exists $self->{quiet} );
-                    }
-
-                    if ( defined $renew_cHGVS ) {
-                        if ($dupopt) {
-                            $trannoEnt->{standard_cHGVS} = $renew_cHGVS;
-                        }
-                        else {
-                            $trannoEnt->{alt_cHGVS} = $renew_cHGVS;
-                        }
-                    }
-                }
-            }
-
-            if (    $real_var->{ref_cn} < $real_var->{alt_cn}
-                and $real_var->{alt_cn} > 2 )
-            {    # non-duplication insertion
-
-                my $ins_cn   = $real_var->{alt_cn} - $real_var->{ref_cn};
-                my $ins_cont = $trRep x $ins_cn;
-
-                $trannoEnt->{standard_cHGVS} =
-                  $f . $chgvs_5 . $trRep . '[' . $real_var->{alt_cn} . ']'
-                  if ( !$dupopt );
-
-                if ( $chgvs_3 =~ /^\d+$/ ) {    # cds / ncRNA exon
+                else {    # non duplication repeat
                     if (
-                        (
-                                $cdsOpt
-                            and $chgvs_3 + 1 <=
-                            ( $trdbEnt->{csto} - $trdbEnt->{csta} )
-                        )
-                        or ( !$cdsOpt and $chgvs_3 + 1 <= $trdbEnt->{len} )
+                        $cdsOpt
+                        and (  $trannoEnt->{protBegin} > 0
+                            or $trannoEnt->{protEnd} > 0 )
+                        and (   $real_var->{replen} == 1
+                            and $real_var->{rl} % 3 == 0
+                            and $real_var->{al} % 3 == 0 )
+                      )
+                    {     # repeat overlap cds and can be transfer to 3bp rep
+                        $real_var->{replen} = 3;
+                        $real_var->{rep}    = $real_var->{rep} x 3;
+                        $real_var->{ref_cn} /= 3;
+                        $real_var->{alt_cn} /= 3;
+                    }
+                    if (
+                        !$cdsOpt
+                        or (    $trannoEnt->{protBegin} == 0
+                            and $trannoEnt->{protEnd} == 0 )
+                        or $real_var->{replen} % 3 == 0
                       )
                     {
-                        $trannoEnt->{alt_cHGVS} =
-                            $f
-                          . $chgvs_3 . '_'
-                          . ( $chgvs_3 + 1 ) . 'ins'
-                          . $ins_cont;
+                    # for non-cds region or cds region with codon-width repeat element
+                        $trannoEnt->{standard_cHGVS} = $f . $chgvs_5;
+                        if ($cmpPos) {
+                            $trannoEnt->{standard_cHGVS} .= '_' . $chgvs_3;
+                        }
+                        $trannoEnt->{standard_cHGVS} .=
+                          $real_var->{rep} . '[' . $real_var->{alt_cn} . ']';
+                        $assign_alt = 1;
                     }
                     else {
-                        my $outlatter;
-                        if ($cdsOpt) {
-                            $outlatter = "*1";
-                        }
-                        else {
-                            $outlatter = "+1";
-                        }
-                        $trannoEnt->{alt_cHGVS} =
-                          $f . $chgvs_3 . '_' . $outlatter . 'ins' . $ins_cont;
+                        $assign_std = 1;
                     }
                 }
-                elsif ( $chgvs_3 =~ /^([\*\+]?)(\-?\d+)$/ ) { # utr or ncRNA ext
-                    my $sig     = $1;
-                    my $ins_pos = $2;
-                    if ( $ins_pos eq '-1' ) {
-                        $trannoEnt->{alt_cHGVS} = $f . '-1_1ins' . $ins_cont;
+                my $trcHGVS;
+                $trBegin = $origin_trBegin;
+                $chgvs_5 = $origin_chgvs_5;
+                $cmpPos  = $origin_cmpPos;
+
+                # using 3'rule to generate common cHGVS, for most of the cases,
+                # assign to alt_cHGVS for repeat variants, except for the non-3x
+                # number repeat element length coding region repeat.
+                if ( $real_var->{ref_cn} > $real_var->{alt_cn} ) { # deletion
+                    my $changed_cn = $real_var->{ref_cn} - $real_var->{alt_cn};
+                    my $changed_cont = $real_var->{rep} x $changed_cn;
+                    if ( $changed_cn == 1 and $real_var->{replen} == 1 ) { # single bp
+                        $trBegin = $trEnd;
+                        $chgvs_5 = $chgvs_3;
+                        $trcHGVS = $f . $chgvs_3 . 'del' . $real_val->{rep};
                     }
-                    else {
-                        $trannoEnt->{alt_cHGVS} =
-                            $f
-                          . $chgvs_3 . '_'
-                          . $sig
-                          . ( $ins_pos + 1 ) . 'ins'
-                          . $ins_cont;
+                    else { # multiple bps
+                        my $renew_offset =
+                          $real_var->{replen} * $real_var->{alt_cn};
+                        $trBegin =
+                          reCalTrPos_by_ofst( $trannoEnt, $renew_offset );
+                        $chgvs_5 =
+                          ($cdsOpt)
+                          ? _cPosMark(
+                            $trBegin,         $trdbEnt->{csta},
+                            $trdbEnt->{csto}, $trdbEnt->{len}
+                          )
+                          : $trBegin;
+                        $trcHGVS =
+                            $f 
+                          . $chgvs_5 . '_' 
+                          . $chgvs_3 . 'del'
+                          . $changed_cont;
                     }
                 }
-                elsif ( $chgvs_3 =~ /^(\-?[^\-\+]+)(\+?d?)(\-?u?\d+)$/ )
-                {    # intron
-                    my $anchor = $1;
-                    my $sig    = $2;
-                    my $ofst   = $3;
-                    my $u3opt  = 0;
-                    if ( $ofst =~ /u/ ) {
-                        $u3opt = 1;
-                        $ofst =~ s/u//;
-                    }
-                    if ( $ofst eq '-1' ) {
-                        $trannoEnt->{alt_cHGVS} =
-                          $f . $chgvs_3 . '_' . $anchor . 'ins' . $ins_cont;
-                    }
-                    else {
-                        my $anc3 = $ofst + 1;
-                        $anc3 =~ s/^-/-u/ if ($u3opt);
-                        $trannoEnt->{alt_cHGVS} =
-                            $f
-                          . $chgvs_3 . '_'
-                          . $anchor
-                          . $sig
-                          . $anc3 . 'ins'
-                          . $ins_cont;
-                    }
+                else { # insertion
+                    my $ins_cn   = $real_var->{alt_cn} - $real_var->{ref_cn};
+                    my $ins_cont = $real_var->{rep} x $ins_cn;
+                    $trBegin = $trannoEnt->{postEnd}->{nDot};
+                    $chgvs_5 =
+                      ($cdsOpt)
+                      ? _cPosMark(
+                        $trBegin,         $trdbEnt->{csta},
+                        $trdbEnt->{csto}, $trdbEnt->{len}
+                      )
+                      : $trBegin;
+                    $cmpPos = -1;
+                    $trcHGVS =
+                      $f . $chgvs_3 . '_' . $chgvs_5 . 'ins' . $ins_cont;
+                }
+                if ($assign_alt) {
+                    $trannoEnt->{alt_cHGVS} = $trcHGVS;
+                }
+                elsif ($assign_std) {
+                    $trannoEnt->{standard_cHGVS} = $trcHGVS;
                 }
                 else {
-                    $self->warn(
-                        "Warning: Unknown chgvs5 while ",
-                        "parsing alt_cHGVS : $tid: $chgvs_3"
-                    ) if ( !exists $self->{quiet} );
+                    $trannoEnt->{c} = $trcHGVS;
                 }
             }
+            else { # w/o genome_h trRefComp may not be able to cover extended region.
+                # the variant after walker may be far more larger than original var
+                # anchor in different HGVS format can only be inferred from variant
+                # ends, and can not be reCal from trRefComp
+
+            }
         }
-        else {
+        else { # non rep
             if ( $cmpPos == 0 ) {    # 1 bp
 
                 $trannoEnt->{c} = $f . $chgvs_5;
@@ -3746,8 +3613,13 @@ sub getTrChange {
                   $f . $chgvs_3 . '_' . $chgvs_5 . 'ins' . $real_a;
             }
         }
+        if ($cdsOpt and $chgvs_5 ne $origin_chgvs_5) {
+            ( $trannoEnt->{protBegin}, $trannoEnt->{protEnd} ) =
+              _getCoveredProd( $trdbEnt, $chgvs_5, $chgvs_3 );
+        }
 
-        # 3. check if transcript-ablation
+        # Function prediction
+        # 1. check if transcript-ablation
         if (    ( $trBegin =~ /^\-/ or $trBegin eq '1' )
             and ( $trEnd =~ /^\+/ or $trEnd eq "$trdbEnt->{len}" ) )
         {
@@ -3780,13 +3652,14 @@ sub getTrChange {
                  # without skip the following steps
         }
 
-        # 4. check if span different exon/intron/promoter/downstream
+        # 2. check if span different exon/intron/promoter/downstream
         if (
             (
                    $chgvs_3 =~ /^\+|\+d/
                 or $trannoEnt->{ei_Begin} ne $trannoEnt->{ei_End}
             )
             and $cmpPos >= 0    # not insertion at the edge
+            and $real_var->{imp} ne 'rep'
           )
         {
             $trannoEnt->{func} = 'span';
@@ -3796,7 +3669,7 @@ sub getTrChange {
             next;
         }
 
-        # 5. check if all promoter
+        # 3. check if all promoter
         if (    $trannoEnt->{r_Begin} eq 'PROM'
             and $trannoEnt->{r_Begin} eq $trannoEnt->{r_End} )
         {
@@ -3805,7 +3678,7 @@ sub getTrChange {
             next;
         }
 
-        # 6. check if all intron
+        # 4. check if all intron
         if (    $trannoEnt->{ei_Begin} =~ /IVS/
             and $trannoEnt->{ei_Begin} eq $trannoEnt->{ei_End} )
         {
@@ -3923,15 +3796,17 @@ sub getTrChange {
             next;
         }
 
-        # 7. check if all exon or ex/intron edge insertion
+        # 5. check if a repeat overlap cds region, to predict protein changing
+
+        # 6. check if all exon or ex/intron edge insertion
         #    count all this insertion to be exon region insertion
         if (
             (
                     $trannoEnt->{ei_Begin} eq $trannoEnt->{ei_End}
                 and $trannoEnt->{ei_Begin} =~ /EX/
             )
-            or
-            ( $cmpPos < 0 and $trannoEnt->{ei_Begin} ne $trannoEnt->{ei_End} )
+            or (    $cmpPos < 0
+                and $trannoEnt->{ei_Begin} ne $trannoEnt->{ei_End} )
           )
         {    # any edge-insertion case will count on the exon change
                 # any coding-utr edge insertion case will count on the
@@ -4028,6 +3903,7 @@ sub getTrChange {
                         }
                     }
 
+                    # For edge insertion case transformation
                     $chgvs_5 = $1 + 1
                       if ( $cmpPos < 0 and $chgvs_5 =~ /^(\d+)\+1$/ );
                     $chgvs_3 = $1 - 1
@@ -4335,7 +4211,7 @@ sub getTrChange {
                     {
                         $prRef = '*';
                     }
-                    elsif ( $prBegin - 1 < $trdbEnt->{plen} ) {
+                    elsif ( $prBegin - 1 <= $trdbEnt->{plen} ) {
                         $prRef = substr(
                             $trdbEnt->{pseq},
                             ( $prBegin - 1 ),
@@ -4782,7 +4658,7 @@ sub prWalker {
     About   : walk around the variant position to find possible
               repeat start/end, and return the recalculated
               trBegin and trEnd, together with the real
-              transcript originated variants and unified property
+              transcript originated variants and unified property of forw strand.
               Current implementation won't walk around in the following
               cases:
               1. no-call
@@ -4791,7 +4667,15 @@ sub prWalker {
               4. non-exon region
               5. span case or any edge case
               6. delins without repeat.
-    Usage   : ($trBegin, $trEnd, $real_var) = 
+
+              Due to genomicWalker may be applied when configured to, 
+              for most of the cases, variant position will not be changed.
+              The case of changing may because of mismatchs or indels between
+              transcript and refgenome, as this case will change genomic variant
+              format, which issue the exception of 3'rule, so variants
+              after genomicWalker do not need trWalker process.
+              
+    Usage   : ($trBegin, $trEnd, $real_var, $rUnified) = 
               $beda->trWalker($tid, $rtrinfo);
     Args    : trAcc and hash ref of trInfo annotation for trAcc,
           
@@ -4801,12 +4685,15 @@ sub prWalker {
 sub trWalker {
     my ( $self, $tid, $rtrinfo ) = @_;
 
-    # reparse the transcript originated var
+    # reparse the transcript originated pseudo var, to get relative changing compared
+    # with the genomic variant mapping back locations.
     my $real_var = BedAnno::Var->new( $tid, 0, length( $rtrinfo->{trRef} ),
         $rtrinfo->{trRef}, $rtrinfo->{trAlt} );
     my @Unified = $real_var->getUnifiedVar('+');
     my ( $real_p, $real_r, $real_a, $real_rl, $real_al ) = @Unified;
 
+    # using trRefComp to calculate renewed begin end transcript nomenclature depending
+    # on the offset position real_p and real_p + real_rl - 1
     my $trBegin = reCalTrPos_by_ofst( $rtrinfo, $real_p );
     my $trEnd = reCalTrPos_by_ofst( $rtrinfo, ( $real_p + $real_rl - 1 ) );
 
@@ -4814,15 +4701,14 @@ sub trWalker {
         # skip snv and mnp
         ( $real_rl == $real_al )
 
-        # skip span case or any edge case
-        or ( $rtrinfo->{ei_Begin} ne $rtrinfo->{ei_End} )
+        # skip non-insertion span cases due to no genome_h involved
+        or ( $rtrinfo->{ei_Begin} ne $rtrinfo->{ei_End} and $real_rl > 0)
 
-        # skip non exon begin/end position
-        or ( $trBegin !~ /^\d+$/ or $trEnd !~ /^\d+$/ )
+        # skip non exon variants (at least one must locate in exon, due to no genome_h)
+        or ( $trBegin !~ /^\d+$/ and $trEnd !~ /^\d+$/ )
 
         # skip delins without repeat
-        or (    0 != index( $real_r, $real_a )
-            and 0 != index( $real_a, $real_r ) )
+        or ( 0 != index($real_r, $real_a) and 0 != index($real_a. $real_r) )
       )
     {
         # no correction
@@ -4832,21 +4718,126 @@ sub trWalker {
     my $qtid = $tid;
     $qtid =~ s/\-\d+$//;
     my $trSeq = $self->{trInfodb}->{$qtid}->{seq};
-    my ( $ref_sta, $ref_sto, $trRef, $trAlt ) =
-      walker( $trBegin, $trEnd, $trSeq, $real_r, $real_a, $real_rl, $real_al );
 
-    if (   $ref_sta ne $trBegin
-        or $ref_sto ne $trEnd )
-    {
-        $trBegin = $ref_sta;
-        $trEnd   = $ref_sto;
+    if ( $trBegin =~ /^\d+$/ and $trEnd =~ /^\d+$/ ) { # exon region
+        my ( $ref_sta, $ref_sto, $trRef, $trAlt ) =
+          walker( $trBegin, $trEnd, $trSeq, $real_r, $real_a, $real_rl, $real_al );
 
-        $real_var =
-          BedAnno::Var->new( $tid, 0, length($trRef), $trRef, $trAlt );
-        @Unified = $real_var->getUnifiedVar('+');
+        if (   $ref_sta ne $trBegin
+            or $ref_sto ne $trEnd )
+        {
+            $trBegin = $ref_sta;
+            $trEnd   = $ref_sto;
+
+            $real_var =
+              BedAnno::Var->new( $tid, 0, length($trRef), $trRef, $trAlt );
+            @Unified = $real_var->getUnifiedVar('+');
+        }
     }
-
+    else { # for edge insertion case, only walk on exon region, due to no genome_h
+        if ( $trBegin =~ /^(\d+)?\+1$/ ) {    # insertion on right edge of exon
+            my $right_edge = $1 || length($trSeq);
+            my $former_trseq = substr( $trSeq, 0, $right_edge );
+            my ( $tmp_sta, $tmp_sto, $tmp_trRef, $tmp_trAlt ) =
+              walker( $right_edge + 1,
+                $trEnd, $former_trseq, $real_r, $real_a, $real_rl, $real_al );
+            if ( $tmp_sta != $right_edge + 1 ) {    # repeat
+                $trBegin = $tmp_sta;
+                $trEnd   = $tmp_sto;
+                $trRef   = $tmp_trRef;
+                $trAlt   = $tmp_trAlt;
+                $real_var =
+                  BedAnno::Var->new( $tid, 0, length($trRef), $trRef, $trAlt );
+                @Unified = $real_var->getUnifiedvar('+');
+            }
+        }
+        elsif ($trEnd =~ /^(\d+)?-1$/) { # insertion on left edge of exon
+            my $left_edge = $1 || 1;
+            my $latter_trseq = substr( $trSeq, $left_edge-1 );
+            my ( $tmp_sta2, $tmp_sto2, $tmp_trRef2, $tmp_trAlt2 ) =
+              walker( 1, 0, $latter_trseq, $real_r, $real_a, $real_rl,
+                $real_al );
+            if ( $tmp_sto2 != 0 ) {
+                $trBegin = $left_edge + $tmp_sta2 - 1;
+                $trEnd = $left_edge + $tmp_sto2 - 1;
+                $trRef = $tmp_trRef2;
+                $trAlt = $tmp_trAlt2;
+                $real_var =
+                  BedAnno::Var->new( $tid, 0, length($trRef), $trRef, $trAlt );
+                @Unified = $real_var->getUnifiedvar('+');
+            }
+        }
+        else {
+            # unexpected insertion case which may not be common, ignore it
+            1;
+        }
+    }
     return ( $trBegin, $trEnd, $real_var, \@Unified );
+}
+
+=head2 genomicWalker
+
+    About   : walk around the variant position to find possible
+              repeat start/end, and return the recalculated
+              genomicBegin and genomicEnd, together with the unified property
+              Current implementation won't walk around in the following
+              cases:
+              1. no-call
+              2. annotation-fail
+              3. snv or mnp
+              4. delins without repeat.
+    Usage   : $real_var = $beda->genomicWalker($rVar);
+    Args    : BedAnno::Var object
+
+=cut
+
+sub genomicWalker {
+    my ( $self, $rVar ) = @_;
+
+    my @Unified = $rVar->getUnifiedVar('-');
+    my ( $real_p, $real_r, $real_a, $real_rl, $real_al ) = @Unified;
+
+    if (
+        !defined $real_al
+
+        # skip snv and mnp
+        or ( $real_rl == $real_al )
+
+        # skip delins without repeat
+        or ( 0 != $real_rl and 0 != $real_al )
+      )
+    {
+        # no correction
+        return $rVar;
+    }
+    my $real_var = $rVar;
+    my $gchr = $rVar->{chr};
+    $gchr = "chr" . $gchr if ($gchr !~ /^chr/);
+    my $walkRegionSta = ($real_p >= 200) ? ($real_p - 200) : 0;
+    my $walkRegionSto = $real_p + $real_rl + 200;
+    my $walkingRegion = $gchr . ":" . ($walkRegionSta + 1) . "-" . $walkRegionSto;
+
+    my $walkingSeq = $self->{genome_h}->getseq($walkingRegion);
+    my $walkingLen = length($walkingSeq);
+    $walkRegionSto = $walkRegionSta + $walkingLen;
+
+    my $relBegin = $real_p - $walkRegionSta + 1;
+    my $relEnd = $real_p - $walkRegionSta + $real_rl;
+
+    my ( $ref_sta, $ref_sto, $newRef, $newAlt ) =
+      walker( $relBegin, $relEnd, $walkingSeq, $real_r, $real_a, $real_rl, $real_al );
+
+    if (   $ref_sta ne $relBegin
+        or $ref_sto ne $relEnd )
+    {
+        $real_var = BedAnno::Var->new(
+            $rVar->{chr},
+            $ref_sta + $walkRegionSta - 1,
+            $ref_sto + $walkRegionSta,
+            $newRef, $newAlt
+        );
+    }
+    return $real_var;
 }
 
 sub walker {
@@ -6561,7 +6552,7 @@ sub TO_JSON {
 
     About   : Assign the BedAnno::Anno obj's trInfo with affected regions
     Usage   : my $AEIndex = $annoEnt->getTrPosition($rannodb, $AEIndex);
-    Args    : $rannodb is a BedAnno::Anno object created by varanno(),
+    Args    : $rannodb is a chromosome branch of BedAnno object's annodb feature,
               $AEIndex is the current index for annodb searching.
     Returns : A new AEIndex for next query.
     Notes   : $AEIndex is used for same chr batch mode.
@@ -7460,7 +7451,7 @@ sub cal_hgvs_pos {
 
         if ( !exists $cal_args{noassign} ) {
 
-           # the Begin End assignment is always from 5'->3' except for insertion
+            # the Begin End assignment is always from 5'->3' except for insertion
             if ($strd) {
                 $annoEnt->{trInfo}->{$tid}->{rnaBegin} = $nDot;
                 $annoEnt->{trInfo}->{$tid}->{cdsBegin} = $cDot;
