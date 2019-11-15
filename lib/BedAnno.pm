@@ -9,13 +9,13 @@ use Time::HiRes qw(gettimeofday tv_interval);
 
 use Tabix;
 
-our $VERSION = '1.16';
+our $VERSION = '1.21';
 
 =head1 NAME
 
 BedAnno - Perl module for annotating variation depend on the BED format database.
 
-=head2 VERSION v1.16
+=head2 VERSION v1.21
 
 From version 0.32 BedAnno will change to support CG's variant shell list
 and use ncbi annotation release 104 as the annotation database
@@ -1581,7 +1581,7 @@ sub readtr {
 
     my $fas_h;
     if ($self->{tr} =~ /\.gz$/) {
-        $fas_h = new IO::Uncompress::Gunzip $self->{tr}, AUTOCLOSE => 1
+        $fas_h = new IO::Uncompress::Gunzip $self->{tr}, AUTOCLOSE => 1, MultiStream => 1
             or confess "Error: [$self->{tr}] $GunzipError\n";
     }
     else {
@@ -1755,7 +1755,7 @@ sub load_anno {
     my $annodb_h;
     if ( 0 == @query_region ) {
         $read_all_opt = 1;
-        $annodb_h = new IO::Uncompress::Gunzip $self->{db}, AUTOCLOSE => 1
+        $annodb_h = new IO::Uncompress::Gunzip $self->{db}, AUTOCLOSE => 1, MultiStream => 1
             or confess "Error: [$self->{db}] $GunzipError\n";
     }
     else {
@@ -2370,6 +2370,11 @@ sub P1toP3 {
         # missense, frameshift
         return 'p.' . $C1toC3{$1} . $2 . $C1toC3{$3} . $4;
     }
+    elsif ( $p1 =~ /^p\.([A-Z\*])(\d+)([A-Z\*])((ext\*.+)?)$/ ) {
+
+        # missense, frameshift
+        return 'p.' . $C1toC3{$1} . $2 . $C1toC3{$3} . $4;
+    }
     elsif ( $p1 =~ /^p\.([A-Z\*])(\d+)(del|dup|\[.*\])$/ ) {
 
         # 1 bp deletion, duplication, repeats
@@ -2391,20 +2396,20 @@ sub P1toP3 {
     elsif ( $p1 =~ /^p\.([A-Z\*])(\d+)_([A-Z\*])(\d+)((del)?ins)([A-Z\*]+)$/ ) {
 
         # insertion, long delins
-        my $former  = 'p.' . $C1toC3{$1} . $2 . '_' . $C1toC3{$3} . $4 . $5;
+        my $former  = 'p.(' . $C1toC3{$1} . $2 . '_' . $C1toC3{$3} . $4 . $5;
         my @singles = split( //, $7 );
         my $latter  = join( "", ( map { $C1toC3{$_} } @singles ) );
-        return $former . $latter;
+        return $former . $latter  . ')';
     }
     elsif ( $p1 =~ /^p\.([A-Z\*])(\d+)((delins)?)\?$/ ) {
 
         # 1 base no-call
-        return 'p.' . $C1toC3{$1} . $2 . $3 . '?';
+        return 'p.(' . $C1toC3{$1} . $2 . $3 . '?)';
     }
     elsif ( $p1 =~ /^p\.([A-Z\*])(\d+)_([A-Z\*])(\d+)(delins\?)$/ ) {
 
         # long no-call
-        return 'p.' . $C1toC3{$1} . $2 . '_' . $C1toC3{$3} . $4 . $5;
+        return 'p.(' . $C1toC3{$1} . $2 . '_' . $C1toC3{$3} . $4 . $5 . ')';
     }
     elsif ( $p1 =~ /^p\.\(([A-Z\*])(\d+)=\)$/ ) {
         return 'p.(' . $C1toC3{$1} . $2 . '=)';
@@ -3913,10 +3918,27 @@ sub getTrChange {
                     $trEnd = $1 - 1
                       if ( $cmpPos < 0 and $trEnd =~ /^(\d+)\-1$/ );
 
+                      if ( $chgvs_5 !~ /^\d+$/ ) {
+                          # special case of transcript - refgenome differing
+                          if ($chgvs_5 =~ /\d([\+\-])(\d+)$/ and my ($c5s, $c5i) = ($1, $2) and $chgvs_3 =~ /\d([\+\-])(\d+)$/ and my ($c3s, $c3i) = ($1, $2)) {
+                              if ($c5s eq $c3s and $c5i < 3 and $c3i < 3) {
+                                  $trannoEnt->{func} = 'splice';
+                                  $trannoEnt->{func} .= ($c5s eq '+') ? '-5' : '-3';
+                              }
+                              else {
+                                  $trannoEnt->{func} = 'intron';
+                              }
+                              next;
+                          }
+                          else {
+                              $self->throw("Error: unavailable 5' cHGVS. $chgvs_5 annoEnt:".Dumper($trannoEnt))
+                                if ( $chgvs_5 == 0 );
+                          }
+                      }
                     # 5' end should be in coding region.
                     # leave this as debug information
-                    $self->throw("Error: unavailable 5' cHGVS. $chgvs_5")
-                      if ( $chgvs_5 !~ /^\d+$/ or $chgvs_5 == 0 );
+                    $self->throw("Error: unavailable 5' cHGVS. $chgvs_5 annoEnt:".Dumper($trannoEnt))
+                      if ( $chgvs_5 == 0 );
 
                     ( $rcInfo5, $rcInfo3 ) =
                       _getPairedCodon( $trdbEnt, $trBegin, $trEnd );
@@ -4050,6 +4072,8 @@ sub getTrChange {
 
                     # probably frame shift flag
                     my $frameshift_flag = ( $diff_ra % 3 > 0 ) ? 1 : 0;
+
+                    my $start_in_cds_flag = ($chgvs_5 > ( $trdbEnt->{csto} - 3 )) ? 0 : 1;
 
                     # end in cds or not.
                     my $end_in_cds_flag = (
@@ -4298,16 +4322,19 @@ sub getTrChange {
 
                     # non stop frameshift with extra non-coded base
                     if ($non_stop_flag) {
+                        my $local_fs_ext;
                         if ( $no_parsed_pP >= $trdbEnt->{plen} ) {
                             $trannoEnt->{func} = 'stop-loss';
+                            $local_fs_ext = 'ext*?';
                         }
                         else {
                             $trannoEnt->{func} = 'frameshift';
+                            $local_fs_ext = 'fs*?';
                         }
                         $trannoEnt->{p} = 'p.'
                           . $no_parsed_prStart
                           . ( $no_parsed_pP + 1 )
-                          . $no_parsed_prAlt_Start . 'fs*?';
+                          . $no_parsed_prAlt_Start . $local_fs_ext;
                         $trannoEnt->{protBegin} += $prSimpleSame;
                         next;
                     }
@@ -4339,24 +4366,24 @@ sub getTrChange {
                     # frameshift
                     if ( !$end_in_cds_flag or $frameshift_flag ) {
 
-                        $trannoEnt->{func} = 'frameshift';
+                        $trannoEnt->{func} = ($start_in_cds_flag and $frameshift_flag) ? 'frameshift' : 'stop-loss';
                         $trannoEnt->{p}    = 'p.'
                           . $no_parsed_prStart
                           . ( $no_parsed_pP + 1 )
                           . $no_parsed_prAlt_Start;
                         my $ext_length = ( length($prAlt) - $prSimpleSame );
                         if ( $ext_length > 0 or $prAlt !~ /\*$/ ) {
-                            $trannoEnt->{p} .= 'fs*';
+                            $trannoEnt->{p} .= ($start_in_cds_flag and $frameshift_flag) ? 'fs*' : 'ext*';
                             if ( $prAlt =~ /\*$/ ) {    # ext length estimated
-                                $trannoEnt->{p} .= $ext_length;
+                                $trannoEnt->{p} .= ($start_in_cds_flag and $frameshift_flag) ? $ext_length : ($ext_length - 1);
                             }
                             else {    # don't meet a stop codon
                                 $trannoEnt->{p} .= '?';
                             }
                         }
                         else {
-                            $trannoEnt->{func} = 'no-change';
-                            $trannoEnt->{p} = 'p.(=)';
+                            $trannoEnt->{func} = 'stop-retained';
+                            $trannoEnt->{p} = 'p.(*' . ( $no_parsed_pP + 1 ) . '=)';
                         }
                         $trannoEnt->{protBegin} += $prSimpleSame;
                         next;
@@ -4417,9 +4444,6 @@ sub getTrChange {
                         }
                         elsif ( $p_a eq '?' ) {    # substitution with N
                             $trannoEnt->{func} = 'unknown-no-call';
-                        }
-                        elsif ( $p_r eq '*' ) {
-                            $trannoEnt->{func} = 'stop-loss';
                         }
                         elsif ( $p_a eq '*' ) {
                             $trannoEnt->{func} = 'nonsense';

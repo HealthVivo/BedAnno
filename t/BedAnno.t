@@ -2287,16 +2287,16 @@ my $span_3U = {
         'exin' => 'EX52E'
     },
     'geneId'     => '1285',
-    'p'          => 'p.H1670Qfs*9',
+    'p'          => 'p.H1670Qext*8',
     'rnaEnd'     => 5181,
-    'p3'         => 'p.His1670Glnfs*9',
+    'p3'         => 'p.His1670Glnext*8',
     'prAlt'      => 'QQNCYFSS*',
     'genepart'   => 'span',
     'prRef'      => 'H*',
-    'func'       => 'frameshift',
-    'funcSO'     => 'SO:0001589',
+    'func'       => 'stop-loss',
+    'funcSO'     => 'SO:0001578',
     'genepartSO' => '',
-    'funcSOname' => 'frameshift_variant',
+    'funcSOname' => 'stop_lost',
     'primaryTag' => 'Y'
 };
 
@@ -3692,8 +3692,8 @@ my $mt_stop_loss = {
     'strd'          => '+',
     'geneSym'       => 'ND1',
     'geneId'        => '4535',
-    'p'             => 'p.*319Wfs*?',
-    'p3'             => 'p.*319Trpfs*?',
+    'p'             => 'p.*319Wext*?',
+    'p3'             => 'p.*319Trpext*?',
     'rnaEnd'        => 956,
     'prAlt'         => 'W',
     'genepart'      => 'CDS',
@@ -3904,6 +3904,8 @@ my $down3_anno_next_to_badaln_edge =
 my $down3_anno_varname = $down3_anno_next_to_badaln_edge->{var}->{varName};
 my $ins_nochange_anno = $bare_beda->anno( "chr11", 67765163, 67765163, "", "G" );
 my $ins_nochange_varname = $ins_nochange_anno->{var}->{varName};
+my $inframe_ins_before_stop = $bare_beda->anno( "chr1", 172376978, 172376978, "", "AGG" );
+my $inframe_ins_before_stop_varname = $inframe_ins_before_stop->{var}->{varName};
 my $long_ref_anno = $bare_beda->anno( "chr2", "27532178", "27533753", "=", "CAGGC" );
 my $long_ref_varname = $long_ref_anno->{var}->{varName};
 my $span_cds_edge_rep_anno = $bare_beda->anno( "chr11", "67434394", "67434394", "", "TTCATCC");
@@ -3914,7 +3916,21 @@ my $ins_stop_anno2 = $bare_beda->anno( "chr17", "7578238", "7578240", "CC", "AA"
 my $ins_stop_varname = $ins_stop_anno2->{var}->{varName};
 my $neighbor_mismatch_anno = $bare_beda->anno("chr9", "134385434", "134385435", "C", "T");
 my $neighbor_mismatch_varname = $neighbor_mismatch_anno->{var}->{varName};
+my $span_with_DI_in_DB = $bare_beda->anno("chr7", "50367357", "50367358", "G", "A");
+my $span_with_DI_in_DB_varname = $span_with_DI_in_DB->{var}->{varName};
+my $stoploss_var_anno = $bare_beda->anno("chr17", 71334725, 71334726, "T", "C");
+my $stoploss_varname = $stoploss_var_anno->{var}->{varName};
+my $stoploss_delvar_anno = $bare_beda->anno("chr17", 71334725, 71334726, "T", "");
+my $stoploss_del_varname = $stoploss_delvar_anno->{var}->{varName};
 
+ok( $stoploss_varname eq "NM_001144952.1(SDK2): c.6519A>G (p.*2173Wext*61)",
+    "for [ stop-loss snv ]" )
+  or explain "The anno info: ", $stoploss_var_anno;
+ok(
+    $stoploss_del_varname eq
+      "NM_001144952.1(SDK2): c.6519delA (p.*2173Cext*39)",
+    "for [ stop-loss del ]"
+) or explain "The ano info: ", $stoploss_del_varname;
 ok( $prTag_correction eq "NM_000151.3(G6PC): c.326G>A (p.C109Y)",
     "for [ primary tag correction ]" )
   or explain "The anno info: ", $prtc_anno;
@@ -3941,6 +3957,11 @@ ok(
 ok ( $ins_nochange_varname eq "NM_030930.2(UNC93B1): c.888C=",
     "for [ ins nochange anno ]"
 ) or explain "The anno info: ", $ins_nochange_anno;
+ok(
+    $inframe_ins_before_stop_varname eq
+      "NM_015569.3(DNM3): c.2589_2590insAGG (p.D863_*864insR)",
+    "for [ inframe ins before stop codon ]"
+) or explain "The anno info: ", $inframe_ins_before_stop;
 ok ( $long_ref_varname eq "NM_002437.4(MPV17): c.462-904_*464+d181delinsGCCTG",
     "for [ long reference anno ]"
 ) or explain "The anno info: ", $long_ref_anno;
@@ -3952,6 +3973,8 @@ ok ( $ins_stop_varname eq "NM_000546.5(TP53): c.609_610delGGinsTT (p.E204*)", "f
 ) or explain "The anno info: ", $ins_stop_anno2;
 ok ( $neighbor_mismatch_varname eq "NM_007171.3(POMT1): c.751_752delCGinsTA (p.R251*)", "for [ neighbor base mismatch anno ]"
 ) or explain "The anno info: ", $neighbor_mismatch_anno;
+ok ( $span_with_DI_in_DB_varname eq "NM_006060.4(IKZF1): c.160+1_160+2insTAAA", "for [ span with DI mismatch in DB case anno ]" 
+) or explain "The anno info: ", $span_with_DI_in_DB;
 
 $bare_beda->DESTROY();
 undef $bare_beda;
